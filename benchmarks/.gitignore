@@ -1,0 +1,10 @@
+# Downloaded / generated dataset (multi-GB) — never commit
+data/
+
+# hyperfine --export-markdown output
+results-*.md
+
+# hyperfine --export-json output
+result.jsonl
+*.jsonl
+

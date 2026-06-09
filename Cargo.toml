@@ -1,0 +1,33 @@
+[package]
+name = "wikidata-grep"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Filter and format a newline-delimited JSON stream of Wikibase entities (a Rust reimplementation of wikibase-dump-filter)"
+license = "MIT"
+repository = "https://github.com/togatoga/wikidata-grep"
+homepage = "https://github.com/togatoga/wikidata-grep"
+readme = "README.md"
+keywords = ["wikidata", "wikibase", "dump", "filter", "ndjson"]
+categories = ["command-line-utilities"]
+exclude = ["benchmarks/", "tests/fixtures/"]
+
+[[bin]]
+name = "wdgrep"
+path = "src/main.rs"
+
+[dependencies]
+ahash = "0.8.12"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+memchr = "2"
+sonic-rs = "0.3"
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

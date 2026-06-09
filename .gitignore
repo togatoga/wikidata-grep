@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target
+
+# Backup / editor files
+*.swp
+*~
+.DS_Store
+
+# Scratch dump/output data in the repo root (anchored with `/` so it never
+# touches the tracked test fixtures under tests/fixtures/).
+/*.ndjson
+/*.ndjsonl
+/*.jsonl
+/*.tsv
+/data/

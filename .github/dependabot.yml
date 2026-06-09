@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Rust crate dependencies (Cargo.toml / Cargo.lock).
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for routine patch/minor bumps; majors stay separate for review.
+      cargo-minor:
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions used by the CI workflow (actions/checkout, actions/cache,
+  # dtolnay/rust-toolchain, …).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
