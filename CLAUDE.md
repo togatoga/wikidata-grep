@@ -157,16 +157,27 @@ porting unit is `wikibase-dump-filter`'s `lib/*.js` and the subset of
 
 ### JSON parsing and serialisation
 
-All parsing uses **sonic-rs** throughout (filter path, build-graph, graph load).
+All *parsing* uses **sonic-rs** (filter path, build-graph, graph load) — it is
+the SIMD-fast, read-only hot path, where object key order doesn't matter.
 `parse_line` calls `Deserializer::use_rawnumber()` so numeric values are stored
 as raw byte strings and serialised back verbatim — no `f64` conversion, no
 reformatting.
 
+*Output serialisation* uses **serde_json** with the `preserve_order` and
+`arbitrary_precision` features. sonic-rs ≥ 0.4.0 hash-orders
+programmatically-built objects (insertion order is **not** preserved, and the
+order is randomised per process run), which would scramble output key order and
+make the bytes nondeterministic. serde_json's `Map` is `IndexMap`-backed, so
+`format.rs` (`--keep`/`--omit`/`--keep-languages`/`--keep-claims`) and
+`build_graph.rs` build and emit objects with keys in input / requested order;
+`arbitrary_precision` round-trips numbers verbatim, matching sonic's
+`use_rawnumber`. This re-parse-with-serde_json step is slower than sonic, but
+runs only on kept + formatted lines (the filter hot path stays on sonic-rs).
+
 When no formatting options are given (`--keep`/`--omit`/`--keep-languages`/
 `--keep-claims` all absent), `process.rs` writes the cleaned raw input bytes
-directly, skipping parse→Value→serialise entirely.
-
-`serde_json` is kept only as a `[dev-dependencies]` for test helpers.
+directly, skipping parse→Value→serialise entirely — so order is trivially
+preserved and serde_json isn't involved at all.
 
 ### Differences from wikibase-dump-filter
 

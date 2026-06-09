@@ -3,7 +3,11 @@
 //! For each entity that has at least one of the requested properties, emits:
 //!   {"id":"Q5","P279":["Q215627"],"P31":["Q5"]}
 //!
-//! Uses sonic-rs for both JSON parsing and serialization.
+//! Uses sonic-rs to parse the input dump (fast, read-only) and serde_json (with
+//! `preserve_order`) to build and serialize the output node, so its keys stay in
+//! a deterministic order — id first, then properties in requested / dump order.
+//! sonic-rs 0.4+ hash-orders programmatically-built objects, which would make
+//! the node key order (and thus the output bytes) nondeterministic.
 //! A memchr prefilter skips the parse entirely for lines that lack all
 //! requested properties.
 
@@ -12,7 +16,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use memchr::memmem::Finder;
-use sonic_rs::{JsonContainerTrait, JsonValueTrait, Object, Value};
+use serde_json::{Map as JsonMap, Value as JsonValue};
+use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
+
+/// The output graph node: an order-preserving JSON object built with serde_json.
+type Node = JsonMap<String, JsonValue>;
 
 use crate::cli::BuildGraphArgs;
 use crate::parse::{is_entity_line, trim_ascii};
@@ -104,7 +112,7 @@ fn process_graph_line<W: Write + ?Sized>(
 
     let id = if want_id {
         Some(
-            node.get(&"id")
+            node.get("id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
@@ -113,7 +121,7 @@ fn process_graph_line<W: Write + ?Sized>(
         None
     };
 
-    let mut buf = sonic_rs::to_vec(&node).map_err(io::Error::other)?;
+    let mut buf = serde_json::to_vec(&node).map_err(io::Error::other)?;
     buf.push(b'\n');
     out.write_all(&buf)?;
 
@@ -131,7 +139,7 @@ fn process_graph_line<W: Write + ?Sized>(
 /// given order. In `all_properties` mode every claim property is scanned (in the
 /// dump's claim order) and any property carrying at least one entity-valued
 /// mainsnak is emitted — so nothing entity-graphable is missed.
-fn parse_and_extract(raw: &[u8], properties: &[String], all_properties: bool) -> Option<Object> {
+fn parse_and_extract(raw: &[u8], properties: &[String], all_properties: bool) -> Option<Node> {
     let trimmed = trim_ascii(raw);
     let cleaned = trimmed.strip_suffix(b",").unwrap_or(trimmed);
     if cleaned.first() != Some(&b'{') {
@@ -148,22 +156,22 @@ fn parse_and_extract(raw: &[u8], properties: &[String], all_properties: bool) ->
 
     let id = entity["id"].as_str()?.to_string();
 
-    let mut node = Object::new();
-    node.insert("id", id.as_str());
+    let mut node = Node::new();
+    node.insert("id".to_string(), JsonValue::String(id));
 
     let mut found_any = false;
-    let mut add_property = |node: &mut Object, prop: &str, statements: &Value| {
+    let mut add_property = |node: &mut Node, prop: &str, statements: &Value| {
         let Some(statements) = statements.as_array() else {
             return;
         };
-        let qids: Value = statements
+        let qids: Vec<JsonValue> = statements
             .iter()
             .filter_map(|stmt| snak_qid(&stmt["mainsnak"]))
-            .map(|s| Value::from(&s))
+            .map(JsonValue::String)
             .collect();
-        if !qids.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        if !qids.is_empty() {
             found_any = true;
-            node.insert(prop, qids);
+            node.insert(prop.to_string(), JsonValue::Array(qids));
         }
     };
 

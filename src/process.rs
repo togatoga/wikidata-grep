@@ -81,8 +81,15 @@ pub fn process_line<W: Write + ?Sized>(
             // skipping the parse→Value→serialize round-trip.
             out.write_all(parse::clean_line(raw).unwrap_or(raw))?;
         } else {
-            let formatted = formatter.format(entity);
-            let buf = sonic_rs::to_vec(&formatted).map_err(io::Error::other)?;
+            // Re-parse with serde_json (order-preserving) for the formatting
+            // path: sonic-rs 0.4+ scrambles built-object key order, so we use an
+            // IndexMap-backed Value to keep output keys in input/requested order.
+            // Only kept+formatted lines pay this extra parse.
+            let cleaned = parse::clean_line(raw).unwrap_or(raw);
+            let value: serde_json::Value =
+                serde_json::from_slice(cleaned).map_err(io::Error::other)?;
+            let formatted = formatter.format(value);
+            let buf = serde_json::to_vec(&formatted).map_err(io::Error::other)?;
             out.write_all(&buf)?;
         }
         out.write_all(b"\n")?;
