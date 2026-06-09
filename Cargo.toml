@@ -22,10 +22,14 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
 memchr = "2"
+# Order-preserving serializer for the formatting path. sonic-rs is used for the
+# (read-only, order-insensitive) parse/filter hot path, but since 0.4.0 its
+# programmatically-built Objects are hash-ordered, which would scramble output
+# key order. serde_json with `preserve_order` (IndexMap) keeps keys in input /
+# requested order; `arbitrary_precision` round-trips numbers verbatim like
+# sonic-rs's `use_rawnumber`. Slower than sonic, but only on kept+formatted lines.
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 sonic-rs = "0.5"
-
-[dev-dependencies]
-serde_json = { version = "1", features = ["preserve_order"] }
 
 [profile.release]
 lto = true

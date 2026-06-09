@@ -2,7 +2,11 @@
 //! Port of `format_entity.js` and `get_format_data.js`.
 
 use anyhow::{Result, bail};
-use sonic_rs::{JsonContainerTrait, Object, Value};
+use serde_json::{Map, Value};
+
+/// An order-preserving JSON object (serde_json's `Map` is backed by `IndexMap`
+/// when the `preserve_order` feature is on).
+type Object = Map<String, Value>;
 
 /// Canonical entity attribute order, used for `--omit`.
 const ATTRIBUTES: &[&str] = &[
@@ -87,7 +91,10 @@ impl Formatter {
     }
 
     pub fn format(&self, entity: Value) -> Value {
-        let mut obj = entity.into_object().unwrap_or_default();
+        let mut obj = match entity {
+            Value::Object(m) => m,
+            _ => Object::new(),
+        };
 
         // Keep only the desired attributes, in the requested order.
         if let Some(keep) = &self.keep {
@@ -96,18 +103,18 @@ impl Formatter {
 
         // Narrow `claims` to the requested properties, in the requested order.
         if let Some(props) = &self.keep_claims
-            && let Some(claims) = obj.get(&"claims").and_then(|v| v.as_object())
+            && let Some(claims) = obj.get("claims").and_then(|v| v.as_object())
         {
             let narrowed = pick_in_order(claims, props);
-            obj.insert("claims", narrowed);
+            obj.insert("claims".to_string(), Value::Object(narrowed));
         }
 
         // Filter languages on labels/descriptions/aliases (and sitelinks).
         if let Some(langs) = &self.keep_languages {
             for attr in ATTRIBUTES_WITH_LANGUAGES {
-                if let Some(attr_obj) = obj.get(attr).and_then(|v| v.as_object()) {
+                if let Some(attr_obj) = obj.get(*attr).and_then(|v| v.as_object()) {
                     let picked = pick_in_order(attr_obj, langs);
-                    obj.insert(*attr, picked);
+                    obj.insert((*attr).to_string(), Value::Object(picked));
                 }
             }
             let keep_sitelinks = self
@@ -115,13 +122,13 @@ impl Formatter {
                 .as_ref()
                 .map(|k| k.iter().any(|a| a == "sitelinks"))
                 .unwrap_or(true);
-            if keep_sitelinks && let Some(sl) = obj.get(&"sitelinks").and_then(|v| v.as_object()) {
+            if keep_sitelinks && let Some(sl) = obj.get("sitelinks").and_then(|v| v.as_object()) {
                 let kept = keep_matching_sitelinks(sl, langs);
-                obj.insert("sitelinks", kept);
+                obj.insert("sitelinks".to_string(), Value::Object(kept));
             }
         }
 
-        obj.into_value()
+        Value::Object(obj)
     }
 }
 
@@ -131,7 +138,7 @@ fn pick_in_order(src: &Object, keys: &[String]) -> Object {
     let mut out = Object::new();
     for k in keys {
         if let Some(v) = src.get(k) {
-            out.insert(k.as_str(), v.clone());
+            out.insert(k.clone(), v.clone());
         }
     }
     out
@@ -147,7 +154,7 @@ fn keep_matching_sitelinks(sitelinks: &Object, langs: &[String]) -> Object {
             // known project name (e.g. "frwiki" -> lang "fr", project "wiki").
             let parts: Vec<&str> = name.split(lang.as_str()).collect();
             if parts.len() > 1 && LANGUAGE_PROJECTS.contains(&parts[1]) {
-                out.insert(name, v.clone());
+                out.insert(name.clone(), v.clone());
                 break 'lang;
             }
         }
@@ -182,13 +189,13 @@ mod tests {
 
     #[test]
     fn keep_sitelinks_by_language_project() {
-        let sitelinks: Value = sonic_rs::from_str(
+        let sitelinks: Value = serde_json::from_str(
             r#"{"frwiki":{"title":"Chat"},"enwiki":{"title":"Cat"},"frwikiquote":{"title":"Chat"}}"#,
         )
         .unwrap();
         let kept = keep_matching_sitelinks(sitelinks.as_object().unwrap(), &["fr".to_string()]);
         // Only the French projects survive, original insertion order preserved.
-        let keys: Vec<&str> = kept.iter().map(|(k, _)| k).collect();
+        let keys: Vec<&str> = kept.keys().map(|k| k.as_str()).collect();
         assert_eq!(keys, vec!["frwiki", "frwikiquote"]);
     }
 }
