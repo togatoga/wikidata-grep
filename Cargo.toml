@@ -22,7 +22,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
 memchr = "2"
-sonic-rs = "0.3"
+sonic-rs = "0.5"
 
 [dev-dependencies]
 serde_json = { version = "1", features = ["preserve_order"] }
