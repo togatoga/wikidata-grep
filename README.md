@@ -60,10 +60,19 @@ wdgrep --graph graph.ndjson --graph-include Q65553774 < latest-all.json > chains
 
 ## Install
 
+From [crates.io](https://crates.io/crates/wikidata-grep) (the crate is
+`wikidata-grep`; the installed command is `wdgrep`):
+
 ```sh
-cargo install --path .
+cargo install wikidata-grep
+```
+
+Or build from source:
+
+```sh
+cargo install --path .   # installs the `wdgrep` binary
 # or
-cargo build --release   # binary at target/release/wdgrep
+cargo build --release    # binary at target/release/wdgrep
 ```
 
 Needs a [Rust toolchain](https://rustup.rs).
