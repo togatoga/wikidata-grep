@@ -25,12 +25,12 @@ fn run_raw(args: &[&str], input: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn wdgrep");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    // The child may exit without reading stdin (the error-path tests fail at
+    // startup), closing the pipe before this write: that broken pipe is fine.
+    // Any other write error is a real harness failure.
+    if let Err(e) = child.stdin.take().unwrap().write_all(input.as_bytes()) {
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "stdin write: {e}");
+    }
     child.wait_with_output().expect("wait")
 }
 
