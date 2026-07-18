@@ -1,19 +1,49 @@
 //! Shared driver for the per-line "read → process → write" loop.
 //!
 //! The filter path (`main`) and the `build-graph` subcommand have identical
-//! plumbing: decide the buffering mode and worker count, open the input, and —
-//! on the sequential path — run a read loop that processes each line, accounts
-//! for progress, and flushes per line when line-buffered. Centralising it here
-//! keeps the two paths from drifting; each supplies only its own per-line
-//! closure.
+//! plumbing: create the progress bar, decide the buffering mode and worker
+//! count, and dispatch to the sequential loop or the parallel pipeline.
+//! [`run`] centralises all of it so the two paths can't drift; each supplies
+//! only its own per-line closure.
 
-use std::io::{self, BufRead, BufReader, BufWriter, ErrorKind, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, ErrorKind, IsTerminal, Write};
 use std::thread;
 
 use anyhow::{Context, Result, bail};
 
+use crate::cli::CommonArgs;
+use crate::parallel;
 use crate::process::LineOutcome;
 use crate::progress::ProgressBar;
+
+/// Run the whole read → process → write pipeline over `input` (a file path, or
+/// stdin when `None`), honouring the shared CLI flags.
+///
+/// `build` receives `want_id` — whether the per-line closure should report the
+/// kept entity's id (only needed when the progress bar is shown) — and returns
+/// the per-line closure. The closure writes any output for the line to the
+/// supplied writer and returns what happened (for progress accounting).
+pub fn run<B, P>(input: Option<String>, common: &CommonArgs, build: B) -> Result<()>
+where
+    B: FnOnce(bool) -> P,
+    P: Fn(&[u8], &mut dyn Write) -> io::Result<LineOutcome> + Send + Sync + 'static,
+{
+    let stdout_tty = io::stdout().is_terminal();
+    let show_progress = !common.quiet && io::stderr().is_terminal();
+    let progress = show_progress.then(ProgressBar::new);
+
+    let (line_buffered, workers) = dispatch(common.line_buffered, common.threads, stdout_tty);
+    let process = build(progress.is_some());
+
+    if workers == 1 {
+        run_sequential(input, progress, line_buffered, process)
+    } else {
+        parallel::run(workers, progress, input, move |line, out| {
+            // Writing to a Vec is infallible, so the Err arm is unreachable.
+            process(line, out).unwrap_or_default()
+        })
+    }
+}
 
 /// Resolve the buffering mode and worker count from the CLI flags.
 ///
@@ -22,11 +52,7 @@ use crate::progress::ProgressBar;
 /// reader batches stdin into large blocks, which would defeat incremental
 /// output. Line buffering auto-enables on a terminal; an explicit `--threads`
 /// (or a non-terminal stdout) means block buffering.
-pub fn dispatch(
-    line_buffered_flag: bool,
-    threads: Option<usize>,
-    stdout_tty: bool,
-) -> (bool, usize) {
+fn dispatch(line_buffered_flag: bool, threads: Option<usize>, stdout_tty: bool) -> (bool, usize) {
     let line_buffered = if line_buffered_flag {
         true
     } else if threads.is_some() {
@@ -75,7 +101,7 @@ fn account(progress: &mut Option<ProgressBar>, outcome: &LineOutcome) {
 /// `process` handles one raw line, writing any output to the supplied writer and
 /// returning what happened (for progress). A broken pipe downstream (e.g.
 /// `| head`) is a clean stop, not an error.
-pub fn run_sequential<F>(
+fn run_sequential<F>(
     input: Option<String>,
     mut progress: Option<ProgressBar>,
     line_buffered: bool,
