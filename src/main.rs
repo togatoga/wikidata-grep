@@ -13,9 +13,8 @@ mod progress;
 mod runner;
 
 use std::fs;
-use std::io::{self, IsTerminal};
+use std::io::Write;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -24,7 +23,6 @@ use cli::{Cli, Commands};
 use filter::Filter;
 use format::Formatter;
 use process::process_line;
-use progress::ProgressBar;
 
 fn main() -> ExitCode {
     let args = Cli::parse();
@@ -60,9 +58,9 @@ fn run(args: Cli) -> Result<()> {
                 &args.graph_include,
                 &args.graph_exclude,
                 &args.graph_properties,
-                args.quiet,
+                args.common.quiet,
             )?;
-            if !args.quiet {
+            if !args.common.quiet {
                 eprintln!("{}", reach.summary());
             }
             filter.graph = Some(reach);
@@ -83,30 +81,11 @@ fn run(args: Cli) -> Result<()> {
         args.keep_languages.as_deref(),
     )?;
 
-    let stdout_tty = io::stdout().is_terminal();
-    let show_progress = !args.quiet && io::stderr().is_terminal();
-
-    let progress = if show_progress {
-        Some(ProgressBar::new())
-    } else {
-        None
-    };
-
-    let (line_buffered, workers) = runner::dispatch(args.line_buffered, args.threads, stdout_tty);
-    let want_id = progress.is_some();
-
-    if workers == 1 {
-        runner::run_sequential(args.input, progress, line_buffered, move |line, out| {
+    runner::run(args.input, &args.common, |want_id| {
+        move |line: &[u8], out: &mut dyn Write| {
             process_line(line, &filter, &formatter, want_id, out)
-        })
-    } else {
-        let filter = Arc::new(filter);
-        let formatter = Arc::new(formatter);
-        parallel::run(workers, progress, args.input, move |line, out| {
-            // Writing to a Vec is infallible, so the Err arm is unreachable.
-            process_line(line, &filter, &formatter, want_id, out).unwrap_or_default()
-        })
-    }
+        }
+    })
 }
 
 /// Resolve the claim expression from the inline `--claim` or the `--claim-file`

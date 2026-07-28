@@ -66,17 +66,19 @@ Pipeline per line: **pre-filter → parse → filter → format → serialize**.
 porting unit is `wikibase-dump-filter`'s `lib/*.js` and the subset of
 `wikibase-sdk` it uses; module names mirror those responsibilities.
 
-- `main.rs` — CLI wiring; dispatches to the `build-graph` subcommand or the filter path. The buffering/worker-count decision and the sequential loop live in `runner` (shared with `build-graph`).
-- `cli.rs` — clap options. `Cli` is the top-level struct with an optional `Commands` subcommand enum. `BuildGraphArgs` holds `build-graph` options; the remaining fields are the filter-mode options mirroring the reference flags. Both share the `-j/--threads` and `--line-buffered` flags.
-- `build_graph.rs` — `wdgrep build-graph` implementation. Reads a dump on stdin, applies a `memchr` pre-filter (skip parse if no requested property string is present), then uses **sonic-rs** (SIMD JSON parser) to extract entity id and entity-valued mainsnaks for each requested property. Outputs `{"id":"Qxxx","P279":[...],"P31":[...]}` NDJSON. When `--properties` is omitted every property carrying an entity-valued mainsnak is emitted — the pre-filter falls back to the `wikibase-entityid` type marker (a sound necessary condition) and `parse_and_extract` iterates all `claims` keys in dump order. Both parsing and serialisation use sonic-rs. The per-line `process_graph_line` runs on both the sequential and parallel paths (same dispatch/buffering policy as the filter path: `-j/--threads`, `--line-buffered`); it feeds `parallel::run` via a closure.
+- `main.rs` — CLI wiring; dispatches to the `build-graph` subcommand or the filter path. Both hand their per-line closure to `runner::run`, which owns the rest of the pipeline.
+- `cli.rs` — clap options. `Cli` is the top-level struct with an optional `Commands` subcommand enum. `BuildGraphArgs` holds `build-graph` options; the remaining fields are the filter-mode options mirroring the reference flags. The shared flags (`-q/--quiet`, `--line-buffered`, `-j/--threads`) live once in `CommonArgs`, `#[command(flatten)]`ed into both.
+- `build_graph.rs` — `wdgrep build-graph` implementation. Reads a dump on stdin, applies a `memchr` pre-filter (skip parse if no requested property string is present), then uses **sonic-rs** (SIMD JSON parser) to extract entity id and entity-valued mainsnaks for each requested property. Outputs `{"id":"Qxxx","P279":[...],"P31":[...]}` NDJSON. When `--properties` is omitted every property carrying an entity-valued mainsnak is emitted — the pre-filter falls back to the `wikibase-entityid` type marker (a sound necessary condition) and `parse_and_extract` iterates all `claims` keys in dump order. Both parsing and serialisation use sonic-rs. The per-line `process_graph_line` runs on both the sequential and parallel paths via `runner::run` (same dispatch/buffering policy as the filter path: `-j/--threads`, `--line-buffered`). Line cleaning, the quoted-token finders and the mainsnak extraction reuse `parse::clean_line`, `filter::quoted` and `filter::snak_entity_id`.
 - `process.rs` — `process_line` (filter path) and the `LineOutcome` type returned
   by every per-line routine (filter and `build-graph`). **Put per-line logic in a
   shared routine, not duplicated across the sequential/parallel paths.**
-- `runner.rs` — shared read→process→write driver for the sequential path, used by
-  both the filter path and `build-graph`, so the two can't drift. Owns the
-  buffering/worker-count policy (`dispatch`), the input opener (`open_input`, also
-  reused by `parallel::reader_loop`), and the sequential loop (read → per-line
-  closure → progress accounting → line-buffered flush).
+- `runner.rs` — `runner::run`, the single read→process→write entry point used by
+  both the filter path and `build-graph`, so the two can't drift. Owns progress
+  bar creation, the buffering/worker-count policy (`dispatch`), the input opener
+  (`open_input`, also reused by `parallel::reader_loop`), the sequential loop
+  (read → per-line closure → progress accounting → line-buffered flush), and the
+  handoff to `parallel::run` when more than one worker is used. Callers pass a
+  `want_id -> per-line closure` builder.
 - `parallel.rs` — order-preserving thread pool (default path), generic over a
   caller-supplied per-line closure `(line, &mut out) -> LineOutcome`, reused by
   both the filter path and `build-graph`. One reader thread slices stdin into
