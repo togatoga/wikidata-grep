@@ -143,12 +143,12 @@ impl Filter {
             return false;
         }
         if let Some(cf) = &self.claim
-            && !self.valid_claims(entity, cf)
+            && !cf.matches(entity)
         {
             return false;
         }
         if let Some(sf) = &self.sitelink
-            && !valid_sitelinks(entity, sf)
+            && !sf.matches(entity)
         {
             return false;
         }
@@ -157,133 +157,148 @@ impl Filter {
         }
         true
     }
+}
 
-    fn valid_claims(&self, entity: &Value, filter: &ClaimFilter) -> bool {
+impl ClaimFilter {
+    fn matches(&self, entity: &Value) -> bool {
         let empty = Value::new_object();
         let claims = entity.get("claims").unwrap_or(&empty);
         // every conjunctive group must have at least one matching disjunctive term
-        filter
-            .groups
+        self.groups
             .iter()
-            .all(|group| group.iter().any(|term| self.valid_claim(claims, term)))
+            .all(|group| group.iter().any(|term| valid_claim(claims, term)))
+    }
+}
+
+impl SitelinkFilter {
+    fn matches(&self, entity: &Value) -> bool {
+        let sitelinks = entity.get("sitelinks").and_then(|v| v.as_object());
+        // The filter holds only a handful of names, so probe the (potentially
+        // large) sitelinks object per name instead of materialising a set of all
+        // its keys.
+        self.required_groups.iter().all(|group| {
+            group
+                .iter()
+                .any(|name| sitelinks.is_some_and(|o| o.contains_key(name)))
+        })
+    }
+}
+
+fn valid_claim(claims: &Value, term: &ClaimTerm) -> bool {
+    // `@P31` (deep) and `P31.P580` (qualifier) use plain positive/negate
+    // semantics.
+    if term.deep {
+        return matches_deep(claims, term) != term.negated;
+    }
+    if let Some(q) = &term.qualifier {
+        return matches_qualifier(claims, term, q) != term.negated;
     }
 
-    fn valid_claim(&self, claims: &Value, term: &ClaimTerm) -> bool {
-        // `@P31` (deep) and `P31.P580` (qualifier) use plain positive/negate
-        // semantics.
-        if term.deep {
-            return self.matches_deep(claims, term) != term.negated;
-        }
-        if let Some(q) = &term.qualifier {
-            return self.matches_qualifier(claims, term, q) != term.negated;
-        }
+    let prop_claims = claims.get(term.property.as_str());
+    let has_claims = prop_claims.is_some_and(nonempty_array);
 
-        let prop_claims = claims.get(term.property.as_str());
-        let has_claims = prop_claims.is_some_and(nonempty_array);
+    if has_claims {
+        if term.negated && term.values.is_none() {
+            return false;
+        }
+    } else if !term.negated {
+        return false;
+    }
 
-        if has_claims {
-            if term.negated && term.values.is_none() {
+    if let Some(qhash) = &term.values {
+        let matched = prop_claims.is_some_and(|pc: &Value| mainsnak_id_in_set(pc, qhash));
+        if matched {
+            if term.negated {
                 return false;
             }
         } else if !term.negated {
             return false;
         }
+    }
+    true
+}
 
-        if let Some(qhash) = &term.values {
-            let matched = prop_claims.is_some_and(|pc: &Value| mainsnak_id_in_set(pc, qhash));
-            if matched {
-                if term.negated {
-                    return false;
-                }
-            } else if !term.negated {
-                return false;
-            }
+/// `@P31`: the property appears as a mainsnak (top-level claim) or as a
+/// qualifier of any statement. References are intentionally not searched.
+/// Returns the *positive* condition (negation is applied by the caller).
+fn matches_deep(claims: &Value, term: &ClaimTerm) -> bool {
+    let want = term.values.as_ref();
+    let mut present = false;
+    let mut matched = false;
+
+    // Top-level mainsnak values.
+    if let Some(pc) = claims.get(term.property.as_str())
+        && nonempty_array(pc)
+    {
+        present = true;
+        if let Some(set) = want {
+            matched |= mainsnak_id_in_set(pc, set);
         }
-        true
     }
 
-    /// `@P31`: the property appears as a mainsnak (top-level claim) or as a
-    /// qualifier of any statement. References are intentionally not searched.
-    /// Returns the *positive* condition (negation is applied by the caller).
-    fn matches_deep(&self, claims: &Value, term: &ClaimTerm) -> bool {
-        let want = term.values.as_ref();
-        let mut present = false;
-        let mut matched = false;
-
-        // Top-level mainsnak values.
-        if let Some(pc) = claims.get(term.property.as_str())
-            && nonempty_array(pc)
-        {
-            present = true;
-            if let Some(set) = want {
-                matched |= mainsnak_id_in_set(pc, set);
-            }
-        }
-
-        // Qualifier values across every statement of every property.
-        if let Some(obj) = claims.as_object() {
-            for (_, statements) in obj.iter() {
-                for statement in statements.as_array().into_iter().flatten() {
-                    if let Some(qsnaks) = statement
-                        .get("qualifiers")
-                        .and_then(|q| q.get(term.property.as_str()))
-                        && nonempty_array(qsnaks)
-                    {
-                        present = true;
-                        if let Some(set) = want {
-                            matched |= snak_id_in_set(qsnaks, set);
-                        }
+    // Qualifier values across every statement of every property.
+    if let Some(obj) = claims.as_object() {
+        for (_, statements) in obj.iter() {
+            for statement in statements.as_array().into_iter().flatten() {
+                if let Some(qsnaks) = statement
+                    .get("qualifiers")
+                    .and_then(|q| q.get(term.property.as_str()))
+                    && nonempty_array(qsnaks)
+                {
+                    present = true;
+                    if let Some(set) = want {
+                        matched |= snak_id_in_set(qsnaks, set);
                     }
                 }
             }
         }
-
-        match want {
-            None => present,
-            Some(_) => matched,
-        }
     }
 
-    /// `P31.P580`: at least one statement of `term.property` must satisfy the
-    /// parent value constraint (on its mainsnak) *and* carry the qualifier
-    /// `q.property` satisfying its value constraint, both on the same statement.
-    /// Returns the *positive* condition (negation is applied by the caller).
-    fn matches_qualifier(&self, claims: &Value, term: &ClaimTerm, q: &PropValue) -> bool {
-        let statements = match claims
-            .get(term.property.as_str())
-            .and_then(|v| v.as_array())
-        {
-            Some(s) => s,
-            None => return false,
-        };
-        statements
-            .iter()
-            .any(|statement| self.statement_matches(statement, term, q))
+    match want {
+        None => present,
+        Some(_) => matched,
     }
+}
 
-    fn statement_matches(&self, statement: &Value, term: &ClaimTerm, q: &PropValue) -> bool {
-        // Parent mainsnak value constraint, scoped to this one statement.
-        if let Some(qhash) = &term.values {
-            let id_ok = statement
-                .get("mainsnak")
-                .and_then(snak_entity_id)
-                .is_some_and(|id| qhash.contains(&id));
-            if !id_ok {
-                return false;
-            }
+/// `P31.P580`: at least one statement of `term.property` must satisfy the
+/// parent value constraint (on its mainsnak) *and* carry the qualifier
+/// `q.property` satisfying its value constraint, both on the same statement.
+/// Returns the *positive* condition (negation is applied by the caller).
+fn matches_qualifier(claims: &Value, term: &ClaimTerm, q: &PropValue) -> bool {
+    let statements = match claims
+        .get(term.property.as_str())
+        .and_then(|v| v.as_array())
+    {
+        Some(s) => s,
+        None => return false,
+    };
+    statements
+        .iter()
+        .any(|statement| statement_matches(statement, term, q))
+}
+
+fn statement_matches(statement: &Value, term: &ClaimTerm, q: &PropValue) -> bool {
+    // Parent mainsnak value constraint, scoped to this one statement.
+    if let Some(qhash) = &term.values {
+        let id_ok = statement
+            .get("mainsnak")
+            .and_then(snak_entity_id)
+            .is_some_and(|id| qhash.contains(&id));
+        if !id_ok {
+            return false;
         }
-        // Qualifier presence (and value) on the same statement.
-        let qsnaks = match statement
-            .get("qualifiers")
-            .and_then(|quals| quals.get(q.property.as_str()))
-        {
-            Some(s) if nonempty_array(s) => s,
-            _ => return false,
-        };
-        match &q.values {
-            None => true,
-            Some(qhash) => snak_id_in_set(qsnaks, qhash),
-        }
+    }
+    // Qualifier presence (and value) on the same statement.
+    let qsnaks = match statement
+        .get("qualifiers")
+        .and_then(|quals| quals.get(q.property.as_str()))
+    {
+        Some(s) if nonempty_array(s) => s,
+        _ => return false,
+    };
+    match &q.values {
+        None => true,
+        Some(qhash) => snak_id_in_set(qsnaks, qhash),
     }
 }
 
@@ -304,7 +319,8 @@ fn entity_letter(entity_type: &str) -> Option<&'static str> {
 /// entity-valued snak. Claim value constraints (`:Qxxx`) are always item ids, so
 /// only entity-valued snaks can ever match; other datatypes are ignored. (This
 /// is the small slice of `simplifyEntity` that claim matching needs now that the
-/// full `--simplify` machinery is gone.)
+/// full `--simplify` machinery is gone.) Also used by `build-graph` to extract
+/// entity-valued mainsnaks.
 pub(crate) fn snak_entity_id(snak: &Value) -> Option<String> {
     let value = snak.get("datavalue")?.get("value")?;
     if let Some(id) = value.get("id").and_then(|v| v.as_str()) {
@@ -379,7 +395,8 @@ fn is_valid_sitelink(s: &str) -> bool {
 /// A property/value/sitelink id appears in the raw JSON wrapped in quotes
 /// (`"P31":`, `"id":"Q5"`, `"enwiki":`), so the quoted token is both a sound
 /// necessary substring and precise enough to avoid `"Q5"` matching `"Q50"`.
-fn quoted(s: &str) -> memchr::memmem::Finder<'static> {
+/// Also used by `build-graph` for its property prefilter.
+pub(crate) fn quoted(s: &str) -> memchr::memmem::Finder<'static> {
     memchr::memmem::Finder::new(format!("\"{s}\"").as_bytes()).into_owned()
 }
 
@@ -461,17 +478,6 @@ fn has_any_sitelink(entity: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn valid_sitelinks(entity: &Value, filter: &SitelinkFilter) -> bool {
-    let sitelinks = entity.get("sitelinks").and_then(|v| v.as_object());
-    // The filter holds only a handful of names, so probe the (potentially large)
-    // sitelinks object per name instead of materialising a set of all its keys.
-    filter.required_groups.iter().all(|group| {
-        group
-            .iter()
-            .any(|name| sitelinks.is_some_and(|o| o.contains_key(name)))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,6 +523,43 @@ mod tests {
         // filters there is nothing to pre-filter on.
         let f = Filter::build(None, None, None, false).unwrap();
         assert!(f.prefilter.is_none());
+    }
+
+    #[test]
+    fn snak_entity_id_modern_and_legacy_formats() {
+        fn id_of(json: &str) -> Option<String> {
+            let v: Value = sonic_rs::from_str(json).unwrap();
+            snak_entity_id(&v)
+        }
+        // Modern format: the id is given verbatim.
+        assert_eq!(
+            id_of(r#"{"datavalue":{"value":{"id":"Q5"}}}"#),
+            Some("Q5".to_string())
+        );
+        // Legacy format: entity-type + numeric-id, for every entity kind.
+        assert_eq!(
+            id_of(r#"{"datavalue":{"value":{"entity-type":"item","numeric-id":5}}}"#),
+            Some("Q5".to_string())
+        );
+        assert_eq!(
+            id_of(r#"{"datavalue":{"value":{"entity-type":"property","numeric-id":31}}}"#),
+            Some("P31".to_string())
+        );
+        assert_eq!(
+            id_of(r#"{"datavalue":{"value":{"entity-type":"form","numeric-id":7}}}"#),
+            Some("F7".to_string())
+        );
+        // Non-entity datavalues (e.g. a string that looks like a QID) and
+        // valueless snaks yield no id.
+        assert_eq!(id_of(r#"{"datavalue":{"value":"Q5"}}"#), None);
+        assert_eq!(id_of(r#"{"snaktype":"novalue"}"#), None);
+        // The rawnumber parse used on the filter path stores numbers as raw
+        // strings; the numeric-id fallback must still resolve them.
+        let entity = crate::parse::parse_line(
+            br#"{"datavalue":{"value":{"entity-type":"item","numeric-id":5}}}"#,
+        )
+        .unwrap();
+        assert_eq!(snak_entity_id(&entity), Some("Q5".to_string()));
     }
 
     #[test]

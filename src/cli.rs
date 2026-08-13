@@ -1,5 +1,27 @@
 use clap::{Args, Parser, Subcommand};
 
+/// Flags shared by the filter mode and the `build-graph` subcommand, flattened
+/// into both so the definitions (and help text) exist once.
+#[derive(Args, Debug)]
+pub struct CommonArgs {
+    /// Suppress the progress bar and informational stderr output.
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
+    /// Flush each matching line as it is written, instead of buffering. Makes
+    /// output appear incrementally (useful for `| tee`, `| head` or debugging).
+    /// Implies single-threaded processing. Auto-enabled when stdout is a
+    /// terminal; pass --threads to force block-buffered parallel output.
+    #[arg(long = "line-buffered")]
+    pub line_buffered: bool,
+
+    /// Number of worker threads for parsing/filtering. Defaults to the number
+    /// of available CPUs. Use 1 for fully sequential processing. Output order
+    /// is always preserved regardless of this value.
+    #[arg(short = 'j', long = "threads")]
+    pub threads: Option<usize>,
+}
+
 /// Filter and format a newline-delimited JSON stream of Wikibase entities.
 ///
 /// Reads a Wikibase JSON dump (NDJSON) on stdin and writes the filtered and
@@ -58,22 +80,8 @@ pub struct Cli {
     #[arg(long = "keep-claims", value_delimiter = ',')]
     pub keep_claims: Option<Vec<String>>,
 
-    /// Suppress the progress bar and informational stderr output.
-    #[arg(short = 'q', long = "quiet")]
-    pub quiet: bool,
-
-    /// Flush each matching line as it is written, instead of buffering. Makes
-    /// output appear incrementally (useful for `| tee`, `| head` or debugging).
-    /// Implies single-threaded processing. Auto-enabled when stdout is a
-    /// terminal; pass --threads to force block-buffered parallel output.
-    #[arg(long = "line-buffered")]
-    pub line_buffered: bool,
-
-    /// Number of worker threads for parsing/filtering. Defaults to the number
-    /// of available CPUs. Use 1 for fully sequential processing. Output order
-    /// is always preserved regardless of this value.
-    #[arg(short = 'j', long = "threads")]
-    pub threads: Option<usize>,
+    #[command(flatten)]
+    pub common: CommonArgs,
 
     /// Path to a property-graph file (as produced by `build-graph`, e.g. with
     /// P31,P279) used for graph-reachability filtering. Loaded into memory once
@@ -125,20 +133,6 @@ pub struct BuildGraphArgs {
     #[arg(long = "properties", value_delimiter = ',')]
     pub properties: Vec<String>,
 
-    /// Suppress the progress bar and informational stderr output.
-    #[arg(short = 'q', long = "quiet")]
-    pub quiet: bool,
-
-    /// Flush each matching line as it is written, instead of buffering. Makes
-    /// output appear incrementally. Implies single-threaded processing.
-    /// Auto-enabled when stdout is a terminal; pass --threads to force
-    /// block-buffered parallel output.
-    #[arg(long = "line-buffered")]
-    pub line_buffered: bool,
-
-    /// Number of worker threads for parsing/extraction. Defaults to the number
-    /// of available CPUs. Use 1 for fully sequential processing. Output order
-    /// is always preserved regardless of this value.
-    #[arg(short = 'j', long = "threads")]
-    pub threads: Option<usize>,
+    #[command(flatten)]
+    pub common: CommonArgs,
 }

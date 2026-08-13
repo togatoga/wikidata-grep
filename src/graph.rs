@@ -28,7 +28,7 @@ use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
-use crate::parse::trim_ascii;
+use crate::filter::is_plain_property_id;
 
 /// A graph node: an entity id parsed into a small, comparable form. `Q`/`P`/`L`
 /// ids with a numeric body use the compact variants; every other id (other
@@ -170,17 +170,11 @@ fn parse_property_set(raw: &[String]) -> Result<Option<HashSet<String>>> {
         return Ok(None);
     }
     for p in raw {
-        if !is_property_id(p) {
+        if !is_plain_property_id(p) {
             bail!("invalid property id: {p}");
         }
     }
     Ok(Some(raw.iter().cloned().collect()))
-}
-
-/// `P<digits>` — the shape of a property key in the graph file.
-fn is_property_id(s: &str) -> bool {
-    matches!(s.as_bytes().split_first(),
-        Some((b'P', rest)) if !rest.is_empty() && rest.iter().all(u8::is_ascii_digit))
 }
 
 /// Target block size (whole lines) handed to each parse worker.
@@ -355,7 +349,7 @@ fn parse_graph_line(
     line: &[u8],
     allowed: Option<&HashSet<String>>,
 ) -> Result<Option<(NodeId, Vec<NodeId>)>> {
-    let trimmed = trim_ascii(line);
+    let trimmed = line.trim_ascii();
     if trimmed.is_empty() {
         return Ok(None);
     }
