@@ -1,7 +1,9 @@
 //! End-to-end tests that run the `wdgrep` binary on a small NDJSON fixture.
 
+use std::fs;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::process::{Command, Output, Stdio};
 
 /// A compact dump: opening bracket, two items, one property, closing bracket.
 /// Lines have the trailing comma that real dumps produce.
@@ -11,25 +13,50 @@ const DUMP: &str = r#"[
 {"type":"property","id":"P31","datatype":"wikibase-item","labels":{"en":{"language":"en","value":"instance of"}},"claims":{}},
 ]"#;
 
-fn run(args: &[&str]) -> String {
+/// Run the binary with `args --quiet`, feeding `input` on stdin, and return the
+/// raw output (status + stdout + stderr) without asserting on the exit code.
+fn run_raw(args: &[&str], input: &str) -> Output {
     let bin = env!("CARGO_BIN_EXE_wdgrep");
     let mut child = Command::new(bin)
         .args(args)
         .arg("--quiet")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn wdgrep");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(DUMP.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().expect("wait");
-    assert!(out.status.success(), "wdgrep exited with failure");
+    // The child may exit without reading stdin (the error-path tests fail at
+    // startup), closing the pipe before this write: that broken pipe is fine.
+    // Any other write error is a real harness failure.
+    if let Err(e) = child.stdin.take().unwrap().write_all(input.as_bytes()) {
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "stdin write: {e}");
+    }
+    child.wait_with_output().expect("wait")
+}
+
+fn run(args: &[&str]) -> String {
+    let out = run_raw(args, DUMP);
+    assert!(
+        out.status.success(),
+        "wdgrep exited with failure: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).expect("utf8 output")
+}
+
+/// Run the binary expecting a non-zero exit; returns stderr for assertions.
+fn run_failure(args: &[&str]) -> String {
+    let out = run_raw(args, DUMP);
+    assert!(!out.status.success(), "expected failure for {args:?}");
+    String::from_utf8(out.stderr).expect("utf8 stderr")
+}
+
+/// Build the property graph of the fixture dump with `build-graph` and write it
+/// to a per-test temp file (unique `name`s keep parallel tests apart).
+fn write_graph(name: &str) -> PathBuf {
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    fs::write(&path, run(&["build-graph"])).expect("write graph file");
+    path
 }
 
 fn ids(output: &str) -> Vec<String> {
@@ -252,4 +279,140 @@ fn build_graph_parallel_matches_sequential() {
     let lb = run(&[base, &["--line-buffered"]].concat());
     assert_eq!(seq, par, "parallel output differs from sequential");
     assert_eq!(seq, lb, "line-buffered output differs from sequential");
+}
+
+#[test]
+fn build_graph_handles_legacy_numeric_id_values() {
+    // A legacy-format entity value (`entity-type` + `numeric-id`, no `id`) is
+    // still extracted as an edge target.
+    let input = concat!(
+        r#"{"type":"item","id":"Q9","claims":{"P279":[{"mainsnak":{"snaktype":"value","#,
+        r#""property":"P279","datavalue":{"value":{"entity-type":"item","numeric-id":42},"#,
+        r#""type":"wikibase-entityid"},"datatype":"wikibase-item"},"type":"statement","#,
+        r#""rank":"normal"}]}}"#
+    );
+    let out = run_raw(&["build-graph", "--properties", "P279"], input);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "{\"id\":\"Q9\",\"P279\":[\"Q42\"]}\n"
+    );
+}
+
+#[test]
+fn claim_file_matches_inline_claim() {
+    // --claim-file reads the (trimmed) expression from a file.
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("claim-expr.txt");
+    fs::write(&path, "P31:Q5\n").unwrap();
+    assert_eq!(
+        run(&["--claim-file", path.to_str().unwrap()]),
+        run(&["--claim", "P31:Q5"])
+    );
+}
+
+// The fixture dump forms the graph Q2 --P31--> Q1 --P31--> Q5 (Q5 itself is not
+// an entity in the dump); the property P31 has no outgoing edges.
+
+#[test]
+fn graph_include_keeps_reachable_ids() {
+    let graph = write_graph("graph-include.ndjson");
+    let g = graph.to_str().unwrap();
+    // Q1 reaches Q5 directly, Q2 transitively; the property P31 reaches nothing.
+    assert_eq!(
+        ids(&run(&["--graph", g, "--graph-include", "Q5"])),
+        vec!["Q1", "Q2"]
+    );
+    // The include target itself is kept when it is in the dump (here: Q1).
+    assert_eq!(
+        ids(&run(&["--graph", g, "--graph-include", "Q1"])),
+        vec!["Q1", "Q2"]
+    );
+    // The graph gate must not change output across thread counts.
+    let base = &["--graph", g, "--graph-include", "Q5"][..];
+    let seq = run(&[base, &["-j1"]].concat());
+    let par = run(&[base, &["-j4"]].concat());
+    assert_eq!(seq, par, "parallel output differs from sequential");
+}
+
+#[test]
+fn graph_exclude_takes_precedence() {
+    let graph = write_graph("graph-exclude.ndjson");
+    let g = graph.to_str().unwrap();
+    // Everything reaching Q1 (Q1 itself and Q2) is dropped; P31 survives.
+    assert_eq!(
+        ids(&run(&["--graph", g, "--graph-exclude", "Q1"])),
+        vec!["P31"]
+    );
+    // Exclude wins over include: the Q5-reachers all also reach Q1.
+    assert_eq!(
+        ids(&run(&[
+            "--graph",
+            g,
+            "--graph-include",
+            "Q5",
+            "--graph-exclude",
+            "Q1"
+        ])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn graph_properties_restricts_edges() {
+    let graph = write_graph("graph-properties.ndjson");
+    let g = graph.to_str().unwrap();
+    // Following only P279 (absent from this graph) leaves Q5 unreachable.
+    let args = &["--graph", g, "--graph-include", "Q5", "--graph-properties"][..];
+    assert_eq!(ids(&run(&[args, &["P279"]].concat())), Vec::<String>::new());
+    // Explicitly following P31 matches the follow-everything default.
+    assert_eq!(ids(&run(&[args, &["P31"]].concat())), vec!["Q1", "Q2"]);
+}
+
+#[test]
+fn graph_composes_with_claim_filter() {
+    let graph = write_graph("graph-claim.ndjson");
+    let g = graph.to_str().unwrap();
+    // The graph include (Q1, Q2) ANDs with --claim P31:Q5 (Q1 only).
+    assert_eq!(
+        ids(&run(&[
+            "--graph",
+            g,
+            "--graph-include",
+            "Q5",
+            "--claim",
+            "P31:Q5"
+        ])),
+        vec!["Q1"]
+    );
+}
+
+#[test]
+fn graph_flags_require_graph() {
+    let err = run_failure(&["--graph-include", "Q5"]);
+    assert!(err.contains("require --graph"), "got: {err}");
+}
+
+#[test]
+fn missing_graph_file_is_an_error() {
+    let err = run_failure(&[
+        "--graph",
+        "/nonexistent/graph.ndjson",
+        "--graph-include",
+        "Q5",
+    ]);
+    assert!(err.contains("cannot open graph"), "got: {err}");
+}
+
+#[test]
+fn invalid_graph_property_is_an_error() {
+    let graph = write_graph("graph-invalid-prop.ndjson");
+    let err = run_failure(&[
+        "--graph",
+        graph.to_str().unwrap(),
+        "--graph-include",
+        "Q5",
+        "--graph-properties",
+        "Q5",
+    ]);
+    assert!(err.contains("invalid property id: Q5"), "got: {err}");
 }

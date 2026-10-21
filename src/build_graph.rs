@@ -11,8 +11,7 @@
 //! A memchr prefilter skips the parse entirely for lines that lack all
 //! requested properties.
 
-use std::io::{self, IsTerminal, Write};
-use std::sync::Arc;
+use std::io::{self, Write};
 
 use anyhow::Result;
 use memchr::memmem::Finder;
@@ -23,62 +22,34 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 type Node = JsonMap<String, JsonValue>;
 
 use crate::cli::BuildGraphArgs;
-use crate::parse::{is_entity_line, trim_ascii};
+use crate::filter::{quoted, snak_entity_id};
+use crate::parse::{clean_line, is_entity_line};
 use crate::process::LineOutcome;
-use crate::progress::ProgressBar;
-use crate::{parallel, runner};
+use crate::runner;
 
 /// Build a prefilter to skip the JSON parse for lines that cannot contribute a
 /// node. In fixed-property mode that's one Finder per requested `"Pxxx"`. When
 /// no properties are specified (all-properties mode) no property name is known
-/// up front, so we fall back to the entity-value type marker `wikibase-entityid`
-/// — a sound necessary condition: a line with no entity-valued snak yields no
-/// graph node.
+/// up front, so we fall back to the entity-value type marker
+/// `"wikibase-entityid"` — a sound necessary condition: a line with no
+/// entity-valued snak yields no graph node.
 fn build_finders(properties: &[String]) -> Vec<Finder<'static>> {
     if properties.is_empty() {
-        return vec![Finder::new(b"wikibase-entityid").into_owned()];
+        return vec![quoted("wikibase-entityid")];
     }
-    properties
-        .iter()
-        .map(|p| Finder::new(format!("\"{p}\"").as_bytes()).into_owned())
-        .collect()
+    properties.iter().map(|p| quoted(p)).collect()
 }
 
 pub fn run(args: &BuildGraphArgs) -> Result<()> {
     let all_properties = args.properties.is_empty();
     let finders = build_finders(&args.properties);
+    let properties = args.properties.clone();
 
-    let stdout_tty = io::stdout().is_terminal();
-    let show_progress = !args.quiet && io::stderr().is_terminal();
-    let progress = if show_progress {
-        Some(ProgressBar::new())
-    } else {
-        None
-    };
-
-    let (line_buffered, workers) = runner::dispatch(args.line_buffered, args.threads, stdout_tty);
-    let want_id = progress.is_some();
-
-    if workers == 1 {
-        runner::run_sequential(None, progress, line_buffered, move |line, out| {
-            process_graph_line(
-                line,
-                &finders,
-                &args.properties,
-                all_properties,
-                want_id,
-                out,
-            )
-        })
-    } else {
-        let finders = Arc::new(finders);
-        let properties = Arc::new(args.properties.clone());
-        parallel::run(workers, progress, None, move |line, out| {
-            // Writing to a Vec is infallible, so the Err arm is unreachable.
+    runner::run(None, &args.common, |want_id| {
+        move |line: &[u8], out: &mut dyn Write| {
             process_graph_line(line, &finders, &properties, all_properties, want_id, out)
-                .unwrap_or_default()
-        })
-    }
+        }
+    })
 }
 
 /// Pre-filter, parse and extract one raw line into a graph node, appending the
@@ -140,12 +111,7 @@ fn process_graph_line<W: Write + ?Sized>(
 /// dump's claim order) and any property carrying at least one entity-valued
 /// mainsnak is emitted — so nothing entity-graphable is missed.
 fn parse_and_extract(raw: &[u8], properties: &[String], all_properties: bool) -> Option<Node> {
-    let trimmed = trim_ascii(raw);
-    let cleaned = trimmed.strip_suffix(b",").unwrap_or(trimmed);
-    if cleaned.first() != Some(&b'{') {
-        return None;
-    }
-
+    let cleaned = clean_line(raw)?;
     let entity: Value = match sonic_rs::from_slice(cleaned) {
         Ok(v) => v,
         Err(e) => {
@@ -166,7 +132,7 @@ fn parse_and_extract(raw: &[u8], properties: &[String], all_properties: bool) ->
         };
         let qids: Vec<JsonValue> = statements
             .iter()
-            .filter_map(|stmt| snak_qid(&stmt["mainsnak"]))
+            .filter_map(|stmt| snak_entity_id(&stmt["mainsnak"]))
             .map(JsonValue::String)
             .collect();
         if !qids.is_empty() {
@@ -188,23 +154,4 @@ fn parse_and_extract(raw: &[u8], properties: &[String], all_properties: bool) ->
     }
 
     if found_any { Some(node) } else { None }
-}
-
-/// Extract the QID string from a mainsnak (sonic-rs Value).
-/// Handles both the modern `{"id":"Q5"}` and legacy `{"entity-type":"item","numeric-id":5}` formats.
-fn snak_qid(snak: &sonic_rs::Value) -> Option<String> {
-    let value = &snak["datavalue"]["value"];
-    // Modern format
-    if let Some(id) = value["id"].as_str() {
-        return Some(id.to_string());
-    }
-    // Legacy format
-    let letter = match value["entity-type"].as_str()? {
-        "item" => "Q",
-        "property" => "P",
-        "lexeme" => "L",
-        _ => return None,
-    };
-    let num = value["numeric-id"].as_u64()?;
-    Some(format!("{letter}{num}"))
 }

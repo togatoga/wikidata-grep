@@ -31,23 +31,18 @@ pub fn process_line<W: Write + ?Sized>(
     want_id: bool,
     out: &mut W,
 ) -> io::Result<LineOutcome> {
-    // Graph-reachability gate on the raw id: reject before parsing entities
-    // whose id cannot reach a --graph-include target (or reaches an exclude one).
-    if let Some(g) = &filter.graph
-        && !g.allows(crate::graph::entity_id(raw))
-    {
-        return Ok(LineOutcome {
-            is_entity: parse::is_entity_line(raw),
-            ..Default::default()
-        });
-    }
-
-    // Cheap SIMD pre-filter on the raw bytes: skip the expensive JSON parse for
-    // lines that cannot possibly match the claim/sitelink filter. Skipped lines
-    // still count toward the total if they are entity lines.
-    if let Some(pf) = &filter.prefilter
-        && !pf.matches(raw)
-    {
+    // Cheap gates on the raw bytes, before the expensive JSON parse: the
+    // graph-reachability check on the line's id (reject entities whose id cannot
+    // reach a --graph-include target, or reaches an exclude one), then the SIMD
+    // substring pre-filter (a sound necessary condition for the claim/sitelink
+    // filter). Rejected lines still count toward the total if they are entity
+    // lines.
+    let rejected = filter
+        .graph
+        .as_ref()
+        .is_some_and(|g| !g.allows(crate::graph::entity_id(raw)))
+        || filter.prefilter.as_ref().is_some_and(|pf| !pf.matches(raw));
+    if rejected {
         return Ok(LineOutcome {
             is_entity: parse::is_entity_line(raw),
             ..Default::default()
